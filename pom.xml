@@ -1,0 +1,94 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.semanticarts.fuseki</groupId>
+  <artifactId>fuseki-mod-transactions</artifactId>
+  <version>0.1.0-SNAPSHOT</version>
+  <packaging>jar</packaging>
+
+  <name>fuseki-mod-transactions</name>
+  <description>
+    Prototype Fuseki module adding held, multi-request (client-facing) transactions
+    on top of TDB2's internal ACID transactions. NOT an Apache Jena artifact --
+    a standalone third-party module built against Jena's public FusekiModule API.
+  </description>
+
+  <properties>
+    <maven.compiler.release>21</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <ver.jena>6.2.0</ver.jena>
+  </properties>
+
+  <dependencies>
+    <dependency>
+      <groupId>org.apache.jena</groupId>
+      <artifactId>jena-fuseki-main</artifactId>
+      <version>${ver.jena}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.jena</groupId>
+      <artifactId>jena-tdb2</artifactId>
+      <version>${ver.jena}</version>
+    </dependency>
+    <!-- Fuseki/Jena code logs via SLF4J but this project pulls in no logging
+         backend transitively; add one so the demo server and module actually
+         print anything. -->
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-simple</artifactId>
+      <version>2.0.16</version>
+      <scope>runtime</scope>
+    </dependency>
+
+    <!-- Test dependencies, matching what Apache Jena itself uses for this kind
+         of test: JUnit 5, and Awaitility for polling background-thread
+         behavior such as the transaction reaper. No Mockito: Jena's own test
+         suites overwhelmingly prefer real objects and in-memory datasets over
+         mocks, and this module has no reason to differ. -->
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <version>6.1.2</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.awaitility</groupId>
+      <artifactId>awaitility</artifactId>
+      <version>4.3.0</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>3.13.0</version>
+        <configuration>
+          <release>21</release>
+        </configuration>
+      </plugin>
+      <plugin>
+        <!-- Old default (2.12.4) predates JUnit 5 support; pin a version that
+             auto-detects the junit-platform provider, matching Jena's own
+             ver.plugin.surefire. -->
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.5.6</version>
+        <configuration>
+          <argLine>-Djava.io.tmpdir=${project.build.directory}/tmp</argLine>
+        </configuration>
+      </plugin>
+      <plugin>
+        <!-- Convenience only: `mvn exec:java` runs the demo server. -->
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>exec-maven-plugin</artifactId>
+        <version>3.4.1</version>
+        <configuration>
+          <mainClass>com.semanticarts.fuseki.transactions.demo.DemoServer</mainClass>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+</project>

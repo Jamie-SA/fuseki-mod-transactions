@@ -1,0 +1,17 @@
+services:
+  fuseki:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: fuseki-with-transactions
+    command: [ "--tdb2", "--update", "--loc", "databases/DB2", "/ds" ]
+    ports:
+      - "3030:3030"
+    volumes:
+      - ./logs:/fuseki/logs
+      - ./databases:/fuseki/databases
+    # Rootless podman only: keeps the container's fixed uid-1000 "fuseki"
+    # user mapped to your own host uid, so the bind-mounted ./databases
+    # directory is actually writable. See DOCKER.md. Harmless/ignored by
+    # docker, whose daemon runs as root and doesn't need this.
+    userns_mode: keep-id
