@@ -70,6 +70,60 @@ everything so far is under `[Unreleased]`.
   `HttpOp` + Awaitility, no Mockito) even though this isn't yet a real
   contribution, so the eventual diff against `apache/jena` — if it ever
   happens — stays small.
+- **Generalized beyond TDB2 to any dataset with `supportsTransactionAbort()`,
+  confirmed against TIM** (Jena's in-memory ACID dataset,
+  `DatasetGraphInMemory`) — prompted by maintainer feedback on
+  [apache/jena#4123](https://github.com/apache/jena/issues/4123): "I believe
+  we have to include in-memory as well." This **supersedes** the
+  `TDBInternal`-based unwrap decision above: `TDBInternal`/`DatasetGraphTDB`
+  typing was removed from `HeldTransaction`, `TransactionRegistry`,
+  `ActionTransactionControl`, and `FMod_Transactions` entirely, in favor of
+  the plain `DatasetGraph` interface and its `supportsTransactionAbort()`
+  capability check. The unwrap-and-cache-the-concrete-type approach turned
+  out to be unnecessary, not just narrower than needed: reading
+  `DatasetGraphTxnCtl` (which `DatasetGraphSwitchable` extends) directly
+  showed its own `exclusivitylock` is held for a transaction's entire
+  `begin()`...`commit()`/`abort()` span, which already blocks any concurrent
+  TDB2 compaction from swapping the underlying generation mid-transaction --
+  the exact hazard the unwrap-and-cache approach existed to guard against.
+  Verified, not just reasoned about: the TDB2 test subclasses now use
+  `DatasetGraphSwitchable` directly with no unwrap, and all pass.
+- **Found the same thread-affinity bug one layer above where it was first
+  reported.** `DatasetGraphTxnCtl`'s `exclusivitylock` (mentioned above) has
+  the identical acquire-on-begin/release-on-commit shape, and the identical
+  consequence, as `TransactionCoordinator`'s -- a second, independent
+  occurrence of the same class of bug. TIM's `DatasetGraphInMemory` has an
+  analogous problem via a different mechanism entirely (`ThreadLocal`-based
+  transaction state rather than a JDK lock). All three converge on the one
+  fix already in place here (pin every operation to one dedicated thread),
+  so this didn't require a design change -- just an update to the
+  documentation ("why" sections in `README.md`/`CLAUDE.md`) to reflect the
+  true scope instead of describing it as TDB2/`TransactionCoordinator`-only.
+- **Test suite restructured into Jena's `AbstractTest`-per-backend pattern**
+  (`AbstractTestGraph`/`AbstractTestPrefixMapping`'s convention): the old
+  single-backend `TestHeldTransaction`/`TestTransactionRegistry` classes
+  became `AbstractTestHeldTransaction`/`AbstractTestTransactionRegistry` with
+  an abstract `freshDataset()`, run via `TestHeldTransactionTDB2`/`TIM` and
+  `TestTransactionRegistryTDB2`/`TIM` subclasses -- so the TIM generalization
+  claim above is actually exercised by the test suite, not just asserted in
+  prose. `TestActionTransactionControl` (the full HTTP suite) gained two
+  targeted TIM tests rather than a fully duplicated suite per backend, since
+  the contract-level tests already establish backend parity. 47 tests total,
+  up from 30.
+
+### Verified
+
+- **Ran the bug report's own "Steps to reproduce" code for real, after being
+  asked directly whether it had been.** It hadn't: the snippet in the report
+  was a cleaned-up, minimal illustration derived from a real crash seen
+  elsewhere (a `server.stop()`/`serverStopped()` path that tried to abort a
+  still-open transaction from the main thread), not independently compiled
+  and run as literal code. Wrote and ran a literal, compilable version
+  (`BugRepro.java`, now at the repo root) -- one mechanical change was needed
+  (an `AtomicReference` to carry the detached state across the two thread
+  lambdas, since Java requires captured locals to be effectively final), no
+  change to the logic or API calls described in the report. It fails
+  exactly as predicted, same stack trace, same file:line references.
 
 ### Fixed
 
@@ -100,3 +154,23 @@ everything so far is under `[Unreleased]`.
 - Filed a feature-proposal issue against `apache/jena` for multi-request
   Fuseki transactions, with this module as the accompanying prototype, and a
   separate bug report for the `TransactionCoordinator` issue found above.
+- `BugRepro.java` at the repo root -- a literal, runnable copy of the bug
+  report's reproduction (see "Verified" above).
+- `TestHeldTransactionTDB2`/`TIM`, `TestTransactionRegistryTDB2`/`TIM`, and
+  the `AbstractTestHeldTransaction`/`AbstractTestTransactionRegistry` base
+  classes they run against (see "Design decisions" above).
+- Two targeted TIM tests in `TestActionTransactionControl`.
+- **Received maintainer feedback on #4123 from Andy Seaborne (afs)**:
+  scope should include TIM (acted on, see above); packaging as a
+  `FusekiModule` is explicitly not endorsed as the eventual shape ("modifying
+  request dispatch is not module-territory"), though it remains a reasonable
+  way to prototype the idea, which is why development continues on it; he
+  independently suggested the same dedicated-thread-per-transaction mechanism
+  already used here, but generalized to Fuseki's dispatch layer; and he
+  raised a genuine concern about long-term support for AI-authored
+  contributions, worth keeping in mind rather than dismissing.
+- [DISPATCH-LEVEL-DESIGN.md](DISPATCH-LEVEL-DESIGN.md) -- a sketch (not an
+  implementation) of what a Fuseki-core, dispatch-level version of this
+  module's mechanism would involve, grounded in reading the actual
+  `Dispatcher`/`ActionExecLib`/`HttpAction` source rather than speculation,
+  written in response to the feedback above.

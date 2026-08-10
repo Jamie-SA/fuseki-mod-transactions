@@ -27,13 +27,15 @@ import org.apache.jena.fuseki.server.DataAccessPointRegistry;
 import org.apache.jena.fuseki.server.DataService;
 import org.apache.jena.fuseki.server.Operation;
 import org.apache.jena.rdf.model.Model;
-import org.apache.jena.tdb2.sys.TDBInternal;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
  * Prototype Fuseki module adding held, multi-request (client-facing) transactions
- * on top of TDB2's existing internal ACID transactions.
+ * on top of any dataset with full ACID transaction support -- confirmed
+ * working against TDB2 and Jena's in-memory transactional implementation
+ * ("TIM"). See {@link HeldTransaction}'s class Javadoc for the backends
+ * checked and why the design generalizes across them.
  *
  * <p>A transaction is begun via a control endpoint "/{dataset}/transactions"
  * and held server-side in a {@link TransactionRegistry}, each held transaction
@@ -74,12 +76,14 @@ public class FMod_Transactions implements FusekiAutoModule {
             if (dataService.hasOperation(TRANSACTIONS)) {
                 continue;
             }
-            // dataService.getDataset() is normally a DatasetGraphSwitchable (TDB2's
-            // compaction-safe wrapper), not a bare DatasetGraphTDB -- see the comment in
-            // ActionTransactionControl.doBegin() for why. TDBInternal.isBackedByTDB()
-            // recognizes both a switchable and a bare DatasetGraphTDB.
-            if (!TDBInternal.isBackedByTDB(dataService.getDataset())) {
-                log.info("Dataset '{}' is not backed by TDB2; skipping transactions endpoint", dap.getName());
+            // supportsTransactionAbort() is the generic DatasetGraph capability check --
+            // true for TDB2 (via its DatasetGraphSwitchable wrapper, which delegates
+            // faithfully) and for TIM (DatasetGraphInMemory), false for e.g. the
+            // "best effort" DatasetGraphMap. See ActionTransactionControl.doBegin() and
+            // HeldTransaction's class Javadoc for why no backend-specific unwrapping is
+            // needed here.
+            if (!dataService.getDataset().supportsTransactionAbort()) {
+                log.info("Dataset '{}' does not support transaction abort; skipping transactions endpoint", dap.getName());
                 continue;
             }
             DataService newDataService = DataService.newBuilder(dataService)

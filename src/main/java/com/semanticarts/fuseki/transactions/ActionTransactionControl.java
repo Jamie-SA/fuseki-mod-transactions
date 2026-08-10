@@ -38,8 +38,6 @@ import org.apache.jena.query.TxnType;
 import org.apache.jena.riot.Lang;
 import org.apache.jena.riot.RDFDataMgr;
 import org.apache.jena.sparql.core.DatasetGraph;
-import org.apache.jena.tdb2.store.DatasetGraphTDB;
-import org.apache.jena.tdb2.sys.TDBInternal;
 import org.apache.jena.update.UpdateExecution;
 
 /**
@@ -78,26 +76,22 @@ public class ActionTransactionControl extends ActionREST {
 
     private void doBegin(HttpAction action) {
         DatasetGraph dsg = action.getDataset();
-        // action.getDataset() is normally a DatasetGraphSwitchable (TDB2's compaction-safe
-        // wrapper around the real DatasetGraphTDB) rather than a bare DatasetGraphTDB --
-        // every documented way of creating a TDB2 dataset (TDB2Factory.connectDataset,
-        // the assembler, the --tdb2 CLI flag) goes through DatabaseMgr.connectDatasetGraph,
-        // which always returns a DatasetGraphSwitchable. TDBInternal.getDatasetGraphTDB()
-        // is the correct unwrap for either case, and it's resolved exactly once, here, at
-        // begin() time -- the resulting DatasetGraphTDB reference is what gets cached in
-        // the HeldTransaction/TransactionRegistry for the rest of the transaction's
-        // lifetime, so a compaction swap on the switchable later can't silently redirect
-        // an in-flight held transaction onto a different storage generation.
-        DatasetGraphTDB tdb = TDBInternal.getDatasetGraphTDB(dsg);
-        if (tdb == null) {
+        // supportsTransactionAbort() is the generic capability check -- no
+        // backend-specific unwrapping needed. See HeldTransaction's class
+        // Javadoc for why this is safe to hold onto (and run every operation
+        // through) as a plain DatasetGraph rather than, e.g., unwrapping
+        // TDB2's DatasetGraphSwitchable to reach a concrete DatasetGraphTDB
+        // (an earlier version of this method did that; it turned out to be
+        // unnecessary once every operation is pinned to one dedicated thread).
+        if (!dsg.supportsTransactionAbort()) {
             throw new ActionErrorException(HttpServletResponse.SC_NOT_IMPLEMENTED,
-                "This prototype only supports TDB2-backed datasets", null);
+                "This prototype only supports datasets with full transaction support (supportsTransactionAbort())", null);
         }
         TxnType txnType = parseTxnType(action.getRequestParameter("type"));
         TransactionRegistry registry = module.registryFor(action.getDatasetName());
         HeldTransaction held;
         try {
-            held = registry.begin(tdb, txnType);
+            held = registry.begin(dsg, txnType);
         } catch (IllegalStateException ex) {
             throw new ActionErrorException(HttpServletResponse.SC_SERVICE_UNAVAILABLE, ex.getMessage(), ex);
         }

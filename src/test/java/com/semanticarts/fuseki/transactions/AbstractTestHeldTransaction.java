@@ -23,33 +23,27 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import org.apache.jena.dboe.base.file.Location;
 import org.apache.jena.graph.NodeFactory;
 import org.apache.jena.graph.Triple;
 import org.apache.jena.query.TxnType;
-import org.apache.jena.tdb2.TDB2Factory;
-import org.apache.jena.tdb2.store.DatasetGraphTDB;
-import org.apache.jena.tdb2.sys.TDBInternal;
+import org.apache.jena.sparql.core.DatasetGraph;
 import org.junit.jupiter.api.Test;
 
 /**
- * Unit tests for {@link HeldTransaction} against a real in-memory TDB2 dataset
- * (no mocking -- a real {@code DatasetGraphTDB} is cheap to create and this is
- * exactly the kind of transaction-lifecycle behavior that's easy to get subtly
- * wrong with a fake).
- * <p>
- * These also directly cover the reason {@code HeldTransaction} pins every
- * operation to one dedicated thread: see the class-level Javadoc there for the
- * {@code TransactionCoordinator} lock issue this works around.
+ * Contract tests for {@link HeldTransaction}, written once against the
+ * {@link DatasetGraph} interface and run against every backend the module
+ * claims to support -- see {@link TestHeldTransactionTDB2} and
+ * {@link TestHeldTransactionTIM} -- the same
+ * write-once-subclass-per-implementation pattern Jena's own
+ * {@code AbstractTestGraph}/{@code AbstractTestPrefixMapping} use.
  */
-public class TestHeldTransaction {
+abstract class AbstractTestHeldTransaction {
 
-    private static DatasetGraphTDB freshDataset() {
-        return TDBInternal.getDatasetGraphTDB(TDB2Factory.connectDataset(Location.mem()));
-    }
+    /** A fresh, empty, transactional dataset -- a new one per call. */
+    abstract DatasetGraph freshDataset();
 
     @Test
-    public void beginAssignsTheRequestedId() {
+    void beginAssignsTheRequestedId() {
         HeldTransaction held = HeldTransaction.begin("my-id", TxnType.READ, freshDataset());
         assertEquals("my-id", held.id);
         assertEquals(TxnType.READ, held.txnType);
@@ -57,8 +51,8 @@ public class TestHeldTransaction {
     }
 
     @Test
-    public void commitMakesInsertedDataVisibleToLaterTransactions() {
-        DatasetGraphTDB dsg = freshDataset();
+    void commitMakesInsertedDataVisibleToLaterTransactions() {
+        DatasetGraph dsg = freshDataset();
         Triple triple = Triple.create(NodeFactory.createURI("urn:s"), NodeFactory.createURI("urn:p"), NodeFactory.createURI("urn:o"));
 
         HeldTransaction held = HeldTransaction.begin("t1", TxnType.WRITE, dsg);
@@ -77,8 +71,8 @@ public class TestHeldTransaction {
     }
 
     @Test
-    public void abortDiscardsInsertedData() {
-        DatasetGraphTDB dsg = freshDataset();
+    void abortDiscardsInsertedData() {
+        DatasetGraph dsg = freshDataset();
         Triple triple = Triple.create(NodeFactory.createURI("urn:s2"), NodeFactory.createURI("urn:p2"), NodeFactory.createURI("urn:o2"));
 
         HeldTransaction held = HeldTransaction.begin("t2", TxnType.WRITE, dsg);
@@ -97,9 +91,9 @@ public class TestHeldTransaction {
     }
 
     @Test
-    public void runPropagatesRuntimeExceptionsFromTheWork() {
+    void runPropagatesRuntimeExceptionsFromTheWork() {
         HeldTransaction held = HeldTransaction.begin("t3", TxnType.READ, freshDataset());
-        RuntimeException thrown = assertThrows(RuntimeException.class, () -> held.run((DatasetGraphTDB d) -> {
+        RuntimeException thrown = assertThrows(RuntimeException.class, () -> held.run((DatasetGraph d) -> {
             throw new IllegalArgumentException("boom");
         }));
         assertEquals("boom", thrown.getMessage());
@@ -107,8 +101,8 @@ public class TestHeldTransaction {
     }
 
     @Test
-    public void multipleSequentialRunCallsAllSeeTheSameTransaction() {
-        DatasetGraphTDB dsg = freshDataset();
+    void multipleSequentialRunCallsAllSeeTheSameTransaction() {
+        DatasetGraph dsg = freshDataset();
         Triple triple = Triple.create(NodeFactory.createURI("urn:s3"), NodeFactory.createURI("urn:p3"), NodeFactory.createURI("urn:o3"));
 
         HeldTransaction held = HeldTransaction.begin("t4", TxnType.WRITE, dsg);
@@ -125,7 +119,7 @@ public class TestHeldTransaction {
     }
 
     @Test
-    public void ageAndIdleMillisAreNonNegativeAndIdleResetsOnRun() throws InterruptedException {
+    void ageAndIdleMillisAreNonNegativeAndIdleResetsOnRun() throws InterruptedException {
         HeldTransaction held = HeldTransaction.begin("t5", TxnType.READ, freshDataset());
 
         Thread.sleep(20);
@@ -139,12 +133,12 @@ public class TestHeldTransaction {
     }
 
     @Test
-    public void beginAssignsUniqueOwnerThreadsPerTransaction() {
+    void beginAssignsUniqueOwnerThreadsPerTransaction() {
         // Not a hard API guarantee, but confirms the "dedicated thread per
         // transaction" design is actually happening rather than accidentally
         // sharing a thread pool across transactions.
-        DatasetGraphTDB dsg1 = freshDataset();
-        DatasetGraphTDB dsg2 = freshDataset();
+        DatasetGraph dsg1 = freshDataset();
+        DatasetGraph dsg2 = freshDataset();
         HeldTransaction h1 = HeldTransaction.begin("t6", TxnType.READ, dsg1);
         HeldTransaction h2 = HeldTransaction.begin("t7", TxnType.READ, dsg2);
 

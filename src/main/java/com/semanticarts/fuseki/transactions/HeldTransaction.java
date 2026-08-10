@@ -24,51 +24,67 @@ import java.util.concurrent.Executors;
 import java.util.function.Function;
 
 import org.apache.jena.query.TxnType;
-import org.apache.jena.tdb2.store.DatasetGraphTDB;
+import org.apache.jena.sparql.core.DatasetGraph;
 
 /**
  * A server-side handle on a client-facing, multi-request transaction layered
- * on top of a TDB2 {@link DatasetGraphTDB}'s internal ACID transaction.
+ * on top of any {@link DatasetGraph} that supports full ACID transactions
+ * (i.e. {@code supportsTransactionAbort()} is true) -- confirmed working
+ * against both TDB2 (via its {@code DatasetGraphSwitchable} wrapper) and
+ * Jena's in-memory transactional implementation ("TIM",
+ * {@code DatasetGraphInMemory} / {@code DatasetGraphFactory.createTxnMem()}).
  * <p>
- * <b>Why every operation runs on one dedicated thread.</b> TDB2's
- * {@code TransactionCoordinator} guards "non-exclusive mode" with a plain
- * {@code java.util.concurrent.locks.ReentrantReadWriteLock}: {@code begin()}
- * acquires its read lock, and {@code commit()}/{@code abort()}/{@code end()}
- * release it. The JDK lock enforces that only the thread that acquired a read
- * lock may release it -- and {@code TransactionalSystem.detach()}/{@code
- * attach(TransactionCoordinatorState)} (the API this class originally tried
- * to use to hand a transaction between HTTP request threads) transfer the
- * transaction's {@code ThreadLocal} state but do <em>not</em> transfer this
- * coordinator-level lock. The result: completing a transaction from any
- * thread other than the one that began it throws {@code
- * IllegalMonitorStateException} unconditionally -- not a race, not an edge
- * case, every time. There is no supported way around this using {@code
- * detach()}/{@code attach()} today (see the module's README for the
- * reproduction and root-cause trace).
+ * <b>Why every operation runs on one dedicated thread.</b> Both backends this
+ * has been checked against bind an active transaction to the calling thread
+ * in a way that a different thread cannot cleanly complete:
+ * <ul>
+ * <li>TDB2's {@code TransactionCoordinator} guards "non-exclusive mode" with
+ * a plain {@code ReentrantReadWriteLock}: {@code begin()} acquires its read
+ * lock, {@code commit()}/{@code abort()}/{@code end()} release it, and the
+ * JDK enforces that only the acquiring thread may release it. The same
+ * pattern, with the same consequence, also exists one layer up in
+ * {@code DatasetGraphTxnCtl} (which {@code DatasetGraphSwitchable} extends) --
+ * its own {@code exclusivitylock} has the identical acquire-on-begin,
+ * release-on-commit/abort shape.
+ * <li>TIM's {@code DatasetGraphInMemory} tracks transaction state in
+ * {@code ThreadLocal}s directly; a thread that never called {@code begin()}
+ * sees {@code isInTransaction() == false} and {@code commit()}/{@code
+ * abort()} throw {@code JenaTransactionException}.
+ * </ul>
+ * {@code TransactionalSystem.detach()}/{@code attach(TransactionCoordinatorState)}
+ * (the documented TDB2 API this class originally tried to use to hand a
+ * transaction between HTTP request threads) transfers the transaction's own
+ * per-thread state but not the coordinator-level lock above it -- so
+ * completing a transaction from any thread other than the one that began it
+ * throws {@code IllegalMonitorStateException} unconditionally under TDB2, not
+ * a race, not an edge case, every time. There is no supported way around this
+ * using {@code detach()}/{@code attach()} today (see the module's README for
+ * the reproduction and root-cause trace, and {@code BugRepro.java} at the
+ * repo root for a runnable one). TIM was never going to support that API at
+ * all, having no notion of detach/attach in the first place.
  * <p>
- * The fix used here sidesteps the problem instead of working around it: each
- * {@code HeldTransaction} owns a single dedicated background thread for its
- * entire lifetime, created when the transaction begins. {@code begin()},
- * every subsequent query/update, and the final {@code commit()}/{@code
- * abort()} all run on that one thread via {@link #run}, so the thread that
- * acquires the coordinator's lock is always the same thread that releases it.
- * No detach/attach handoff is needed at all: the transaction simply stays
- * bound to its dedicated thread (via TDB2's own {@code ThreadLocal}) for as
- * long as it's held. A useful side effect: two HTTP requests racing to use
- * the same transaction id are automatically serialized by the executor's
- * single-thread queue rather than needing an explicit lock here.
+ * The fix used here sidesteps the problem, for either backend, instead of
+ * working around it: each {@code HeldTransaction} owns a single dedicated
+ * background thread for its entire lifetime, created when the transaction
+ * begins. {@code begin()}, every subsequent query/update, and the final
+ * {@code commit()}/{@code abort()} all run on that one thread via
+ * {@link #run}, so whichever thread-affine state a given backend keeps is
+ * always touched by the same thread throughout. No detach/attach handoff is
+ * needed at all, for any backend. A useful side effect: two HTTP requests
+ * racing to use the same transaction id are automatically serialized by the
+ * executor's single-thread queue rather than needing an explicit lock here.
  */
 final class HeldTransaction {
 
     final String id;
     final TxnType txnType;
-    private final DatasetGraphTDB dsg;
+    private final DatasetGraph dsg;
     private final ExecutorService owner;
 
     private volatile long createdAtNanos;
     private volatile long lastTouchedNanos;
 
-    private HeldTransaction(String id, TxnType txnType, DatasetGraphTDB dsg, ExecutorService owner) {
+    private HeldTransaction(String id, TxnType txnType, DatasetGraph dsg, ExecutorService owner) {
         this.id = id;
         this.txnType = txnType;
         this.dsg = dsg;
@@ -78,10 +94,10 @@ final class HeldTransaction {
     }
 
     /**
-     * Begins a new TDB2 transaction on a fresh dedicated thread and returns a
-     * handle bound to it for the transaction's whole lifetime.
+     * Begins a new transaction on {@code dsg} on a fresh dedicated thread and
+     * returns a handle bound to it for the transaction's whole lifetime.
      */
-    static HeldTransaction begin(String id, TxnType txnType, DatasetGraphTDB dsg) {
+    static HeldTransaction begin(String id, TxnType txnType, DatasetGraph dsg) {
         ExecutorService owner = Executors.newSingleThreadExecutor(runnable -> {
             Thread t = new Thread(runnable, "fuseki-transaction-" + id);
             t.setDaemon(true);
@@ -102,7 +118,7 @@ final class HeldTransaction {
      * is rethrown here as itself if it's a {@code RuntimeException}, or
      * wrapped otherwise.
      */
-    <T> T run(Function<DatasetGraphTDB, T> work) {
+    <T> T run(Function<DatasetGraph, T> work) {
         return run(() -> work.apply(dsg));
     }
 

@@ -1,19 +1,14 @@
 # fuseki-mod-transactions (prototype)
 
-A standalone [`FusekiModule`](https://jena.apache.org/) that adds **multi-request,
-client-facing transactions** to Apache Jena Fuseki, layered on top of TDB2's
-existing internal ACID transactions. This is a prototype/workaround built as a
-custom module -- not a change to Apache Jena itself -- while
-[the upstream proposal](https://github.com/apache/jena/issues) to add this to
-Fuseki core is discussed.
+_NOTE: This module is written by AI._
 
-It's deliberately kept as a third-party module (own groupId/package, plain
-Apache-2.0 license header, not the ASF "Licensed to the Apache Software
-Foundation under a CLA" header Jena's own files carry) rather than shaped as an
-in-tree Jena contribution, since it hasn't actually been contributed under a
-CLA. Its code style, test libraries, and test rigor do follow Jena's own
-conventions (see "Testing" below), since the point is to be a faithful,
-mergeable-shaped prototype if the upstream proposal is ever accepted.
+A standalone [`FusekiModule`](https://jena.apache.org/) that adds **multi-request,
+client-facing transactions** to Apache Jena Fuseki, layered on top of any
+dataset with full ACID transaction support. This is a prototype/workaround
+built as a custom module -- not a change to Apache Jena itself -- while
+[the upstream proposal](https://github.com/apache/jena/issues/4123) to add this to
+Fuseki core is discussed. See [CHANGELOG.md](CHANGELOG.md) for how the design
+has evolved, including feedback from Jena's own maintainers on that issue.
 
 Built and verified against `org.apache.jena:jena-fuseki-main:6.2.0` /
 `jena-tdb2:6.2.0` (the latest release at the time this was written).
@@ -35,19 +30,22 @@ implementation detail -- it works around a real bug in Jena's own TDB2 code
 HTTP requests racing to use the same transaction id just queue up on that one
 thread instead of needing an explicit lock.
 
-**Only TDB2-backed datasets are supported.** `action.getDataset()`/
-`DataService.getDataset()` is normally a `DatasetGraphSwitchable` (TDB2's
-compaction-safe wrapper), not a bare `DatasetGraphTDB` -- every documented way
-of creating a TDB2 dataset (`TDB2Factory.connectDataset`, the assembler, the
-`--tdb2` CLI flag) goes through `DatabaseMgr.connectDatasetGraph`, which always
-returns the switchable. This module uses `org.apache.jena.tdb2.sys.TDBInternal`
-(`getDatasetGraphTDB()`/`isBackedByTDB()`) to unwrap it correctly, resolved
-once at `begin()` time and cached for the transaction's whole life so a
-compaction swap later can't silently redirect an in-flight held transaction
-onto a different storage generation. TDB1 and in-memory datasets have no
-equivalent unwrap target, so `FMod_Transactions.configured()` never wires the
-`transactions` endpoint onto them at all -- hitting it on such a dataset is a
-plain `404`, not a `501`.
+**Any dataset that `supportsTransactionAbort()` is supported** -- confirmed
+against both TDB2 and Jena's in-memory transactional implementation ("TIM",
+`DatasetGraphInMemory` / `DatasetGraphFactory.createTxnMem()`). No
+backend-specific unwrapping is needed: `action.getDataset()` is normally a
+`DatasetGraphSwitchable` for TDB2 (its compaction-safe wrapper), but it
+delegates `begin()`/`commit()`/`abort()`/`end()` faithfully, and its own
+locking (see "A real Jena bug this design works around" below) already
+prevents a compaction swap from landing mid-transaction -- so this module
+just holds onto whatever `DatasetGraph` it's given and calls the ordinary
+`Transactional` methods on it. Datasets that don't support abort (e.g.
+`DatasetGraphFactory.create()`, "best effort" MRSW locking only) never get
+the `transactions` endpoint wired up at all -- `FMod_Transactions.configured()`
+skips them, so hitting the endpoint on such a dataset is a plain `404`, not a
+`501`. TDB1 is untested (no particular reason to expect it not to work, since
+it also implements `Transactional` normally, but it hasn't been run against
+it).
 
 A background reaper force-aborts a held transaction after 60 seconds idle
 (`FMod_Transactions.IDLE_TIMEOUT_MILLIS`), and at most 50 transactions can be
@@ -102,15 +100,31 @@ detach/attach design, not a misuse on this module's part -- fixing it upstream
 like the `Semaphore` already used elsewhere in the same class for
 `writersWaiting`) would remove the need for this workaround entirely. **This is
 independent of whether the multi-request-transactions feature itself is ever
-accepted**, and is worth reporting to the Jena project on its own.
+accepted**, and has been filed against the Jena project on its own. It was
+verified for real, not just inferred: `BugRepro.java` at the repo root is a
+literal, runnable copy of the reproduction in that report -- `javac`/`java` it
+directly (see the comment at the top of the file for the exact commands) and
+it reliably throws the exception above.
 
-This module's actual fix: don't fight the lock's thread affinity, make it a
-non-issue. `HeldTransaction.begin()` calls `dsg.begin(txnType)` on a fresh,
-dedicated single-thread executor, and every later operation for that
-transaction's whole life -- including the final commit/abort -- runs on that
-same thread via `HeldTransaction.run(...)`. The thread that acquires
-`exclusivitylock` is always the thread that releases it, because it's the only
-thread that ever touches this transaction.
+The same acquire-on-begin/release-on-commit shape, with the identical
+consequence, also exists one layer above `TransactionCoordinator`, in
+`DatasetGraphTxnCtl` (which `DatasetGraphSwitchable` extends) -- its own
+`exclusivitylock` field has the same bug. And Jena's in-memory transactional
+implementation ("TIM", `DatasetGraphInMemory`) has an analogous problem by a
+different mechanism: it tracks transaction state directly in `ThreadLocal`s,
+so a thread that never called `begin()` sees `isInTransaction() == false` and
+`commit()`/`abort()` throw `JenaTransactionException` instead. Three separate
+places, two different underlying mechanisms, same root shape: a transaction's
+completion is tied to the thread that began it.
+
+This module's actual fix: don't fight any of that thread affinity, make it a
+non-issue regardless of which backend or which internal lock is involved.
+`HeldTransaction.begin()` calls `dsg.begin(txnType)` on a fresh, dedicated
+single-thread executor, and every later operation for that transaction's
+whole life -- including the final commit/abort -- runs on that same thread via
+`HeldTransaction.run(...)`. Whichever thread-affine state a given backend
+keeps, it's always the same thread touching it throughout, so none of the
+above ever triggers.
 
 ## Build & run
 
@@ -125,7 +139,8 @@ To add it to your own Fuseki server instead of the demo: put the built jar (and
 its transitive dependencies) on the classpath alongside `jena-fuseki-main`; the
 `META-INF/services/org.apache.jena.fuseki.main.sys.FusekiAutoModule` entry means
 `FusekiServer.create()` picks it up automatically -- no code changes needed, as
-long as your dataset is TDB2-backed.
+long as your dataset supports transaction abort (TDB2 and TIM both do; see
+"How it works").
 
 ## Testing
 
@@ -137,10 +152,17 @@ different style:
 - **Real objects, no mocking.** Jena's own test suites overwhelmingly prefer
   real in-memory datasets and real embedded servers over mocks (a single hit
   for Mockito across the entire `jena-fuseki2`/`jena-arq` tree). Every test
-  here uses a real in-memory TDB2 dataset (`TDB2Factory.connectDataset(Location.mem())`)
-  and, for the HTTP-level tests, a real embedded `FusekiServer` on an
-  OS-assigned port (`.port(0)`) -- the same pattern as `jena-fuseki-main`'s own
+  here uses a real dataset (TDB2 in-memory, or TIM) and, for the HTTP-level
+  tests, a real embedded `FusekiServer` on an OS-assigned port (`.port(0)`) --
+  the same pattern as `jena-fuseki-main`'s own
   `AbstractFusekiTest`/`TestFusekiCustomOperation`.
+- **Contract tests parameterized by backend**, matching Jena's own
+  `AbstractTestGraph`/`AbstractTestPrefixMapping` pattern: `HeldTransaction`
+  and `TransactionRegistry`'s tests are each written once against an abstract
+  `freshDataset()` method (`AbstractTestHeldTransaction`,
+  `AbstractTestTransactionRegistry`) and run against both TDB2 and TIM via
+  thin subclasses, so a claim like "commit makes data visible" is verified for
+  both backends from a single test body.
 - **Jena's own HTTP client** (`org.apache.jena.http.HttpOp`) for the
   end-to-end tests, not a generic HTTP library -- `HttpException.getStatusCode()`
   is used to assert on error responses, matching how Jena's own tests do it.
@@ -154,22 +176,28 @@ different style:
   method its own randomly-named dataset path so their `TransactionRegistry`
   instances never interfere with each other regardless.
 
-Three test classes, 30 tests total:
+Five test classes (two of them backend-parameterized pairs), 47 tests total:
 
-- `TestHeldTransaction` -- the dedicated-thread lifecycle itself: begin,
+- `AbstractTestHeldTransaction` (run as `TestHeldTransactionTDB2` and
+  `TestHeldTransactionTIM`) -- the dedicated-thread lifecycle itself: begin,
   commit visibility, abort rollback, exception propagation from `run()`,
   idle/age bookkeeping, and confirms distinct transactions really do get
   distinct threads.
-- `TestTransactionRegistry` -- id assignment, the `maxConcurrent` cap,
+- `AbstractTestTransactionRegistry` (run as `TestTransactionRegistryTDB2` and
+  `TestTransactionRegistryTIM`) -- id assignment, the `maxConcurrent` cap,
   commit/abort removing their entry (including via `@AfterEach` cleanup so no
   test leaks its reaper thread), the idle reaper actually firing, and that the
   reaper safely queues behind (rather than corrupts) a transaction with an
   in-flight operation.
-- `TestActionTransactionControl` -- full HTTP round-trips: begin/update/query/
-  commit/abort, cross-transaction isolation (an uncommitted change is invisible
-  to the ordinary `/query` endpoint until commit), the documented error status
-  codes (`400`, `404`, `405`), and that a non-TDB2 dataset never gets the
-  endpoint wired up at all (`404`, not `501` -- see "How it works").
+- `TestActionTransactionControl` -- full HTTP round-trips against TDB2:
+  begin/update/query/commit/abort, cross-transaction isolation (an
+  uncommitted change is invisible to the ordinary `/query` endpoint until
+  commit), the documented error status codes (`400`, `404`, `405`), that a
+  non-abortable dataset never gets the endpoint wired up at all, plus two
+  targeted tests confirming the same begin/commit/isolation behavior against
+  a TIM dataset specifically (not the full HTTP suite duplicated per backend --
+  the contract-level coverage above already does that; these just confirm the
+  HTTP layer itself doesn't quietly assume TDB2).
 
 No numeric coverage target is tracked here, matching Jena itself -- there's no
 Jacoco or similar in Jena's own build. "Equivalent coverage" is judged the way
@@ -211,13 +239,15 @@ curl -s http://localhost:3030/ds/query --data-urlencode 'query=SELECT * WHERE { 
 
 ## Known limitations (by design, for a prototype)
 
-- TDB2-only; a non-TDB2 dataset never gets the `transactions` endpoint at all
-  (`404`, not `501` -- see "How it works").
+- Confirmed against TDB2 and TIM; a dataset that doesn't
+  `supportsTransactionAbort()` never gets the `transactions` endpoint at all
+  (`404`, not `501` -- see "How it works"). TDB1 is untested, not deliberately
+  excluded.
 - No auth/ownership check on a transaction id -- anyone who can reach the
   dataset's endpoints and knows (or guesses) a `txn` UUID can use it. Fine for
   local experimentation, not for a shared/multi-tenant deployment.
 - No persistence of in-flight held transactions across a server restart --
-  they're purely in-memory bookkeeping around a live TDB2 transaction.
+  they're purely in-memory bookkeeping around a live backend transaction.
 - Idle timeout and max-concurrent are hardcoded, not configurable via the
   Fuseki config file/assembler.
 - Each held transaction consumes one real OS thread for its lifetime;
@@ -244,3 +274,12 @@ can't do -- it's exactly the kind of change that needs to land in Fuseki core,
 not a plugin. Hence this prototype's own `op=query`/`op=update` sub-operations
 on a dedicated endpoint, which fully own their transaction lifecycle instead of
 going through the stock begin/end path.
+
+Jena maintainer Andy Seaborne raised the same point independently when this
+proposal was posted upstream, suggesting a core-Fuseki-dispatch-level version
+of the same "dedicated thread per transaction" idea used here, generalized to
+work for any backend and (potentially) without needing separate `op=query`/
+`op=update` sub-operations. See
+[DISPATCH-LEVEL-DESIGN.md](DISPATCH-LEVEL-DESIGN.md) for a sketch of what that
+would involve, and [CHANGELOG.md](CHANGELOG.md) for the full feedback this
+module's design has received so far.

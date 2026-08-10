@@ -27,34 +27,35 @@ import java.util.NoSuchElementException;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
-import org.apache.jena.dboe.base.file.Location;
 import org.apache.jena.query.TxnType;
-import org.apache.jena.tdb2.TDB2Factory;
-import org.apache.jena.tdb2.store.DatasetGraphTDB;
-import org.apache.jena.tdb2.sys.TDBInternal;
+import org.apache.jena.sparql.core.DatasetGraph;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
-/** Tests for {@link TransactionRegistry}, including its background reaper thread. */
-public class TestTransactionRegistry {
+/**
+ * Contract tests for {@link TransactionRegistry}, including its background
+ * reaper thread, written once against {@link DatasetGraph} and run against
+ * every backend the module claims to support -- see
+ * {@link TestTransactionRegistryTDB2} and {@link TestTransactionRegistryTIM}.
+ */
+abstract class AbstractTestTransactionRegistry {
 
     private TransactionRegistry registry;
 
-    private static DatasetGraphTDB freshDataset() {
-        return TDBInternal.getDatasetGraphTDB(TDB2Factory.connectDataset(Location.mem()));
-    }
+    /** A fresh, empty, transactional dataset -- a new one per call. */
+    abstract DatasetGraph freshDataset();
 
     @AfterEach
-    public void stopRegistry() {
+    void stopRegistry() {
         if (registry != null) {
             registry.shutdown();
         }
     }
 
     @Test
-    public void beginAssignsUniqueIds() {
+    void beginAssignsUniqueIds() {
         registry = new TransactionRegistry(60_000, 50, 10_000);
-        DatasetGraphTDB dsg = freshDataset();
+        DatasetGraph dsg = freshDataset();
 
         HeldTransaction t1 = registry.begin(dsg, TxnType.READ);
         HeldTransaction t2 = registry.begin(dsg, TxnType.READ);
@@ -68,15 +69,15 @@ public class TestTransactionRegistry {
     }
 
     @Test
-    public void getUnknownIdThrowsNoSuchElement() {
+    void getUnknownIdThrowsNoSuchElement() {
         registry = new TransactionRegistry(60_000, 50, 10_000);
         assertThrows(NoSuchElementException.class, () -> registry.get("no-such-id"));
     }
 
     @Test
-    public void maxConcurrentIsEnforced() {
+    void maxConcurrentIsEnforced() {
         registry = new TransactionRegistry(60_000, 1, 10_000);
-        DatasetGraphTDB dsg = freshDataset();
+        DatasetGraph dsg = freshDataset();
 
         HeldTransaction t1 = registry.begin(dsg, TxnType.READ);
         assertThrows(IllegalStateException.class, () -> registry.begin(dsg, TxnType.READ));
@@ -88,9 +89,9 @@ public class TestTransactionRegistry {
     }
 
     @Test
-    public void commitRemovesTheEntry() {
+    void commitRemovesTheEntry() {
         registry = new TransactionRegistry(60_000, 50, 10_000);
-        DatasetGraphTDB dsg = freshDataset();
+        DatasetGraph dsg = freshDataset();
         HeldTransaction held = registry.begin(dsg, TxnType.WRITE);
 
         registry.commit(held.id);
@@ -99,9 +100,9 @@ public class TestTransactionRegistry {
     }
 
     @Test
-    public void abortRemovesTheEntry() {
+    void abortRemovesTheEntry() {
         registry = new TransactionRegistry(60_000, 50, 10_000);
-        DatasetGraphTDB dsg = freshDataset();
+        DatasetGraph dsg = freshDataset();
         HeldTransaction held = registry.begin(dsg, TxnType.WRITE);
 
         registry.abort(held.id);
@@ -110,11 +111,11 @@ public class TestTransactionRegistry {
     }
 
     @Test
-    public void reaperAbortsTransactionIdleLongerThanTimeout() {
+    void reaperAbortsTransactionIdleLongerThanTimeout() {
         // Short idle timeout and short reaper interval so the test doesn't
         // have to wait long; maxConcurrent stays generous.
         registry = new TransactionRegistry(50, 50, 20);
-        DatasetGraphTDB dsg = freshDataset();
+        DatasetGraph dsg = freshDataset();
         HeldTransaction held = registry.begin(dsg, TxnType.READ);
 
         await().atMost(2, TimeUnit.SECONDS)
@@ -123,13 +124,13 @@ public class TestTransactionRegistry {
     }
 
     @Test
-    public void reaperWaitsForAnInFlightOperationRatherThanCorruptingIt() throws InterruptedException {
+    void reaperWaitsForAnInFlightOperationRatherThanCorruptingIt() throws InterruptedException {
         // A transaction whose HeldTransaction.run() is still executing when
         // the idle deadline passes must not be corrupted by the reaper -- the
         // reaper's abort() is expected to queue behind it on the transaction's
         // own dedicated thread (see HeldTransaction) and only run afterwards.
         registry = new TransactionRegistry(50, 50, 20);
-        DatasetGraphTDB dsg = freshDataset();
+        DatasetGraph dsg = freshDataset();
         HeldTransaction held = registry.begin(dsg, TxnType.READ);
 
         CountDownLatch releaseWork = new CountDownLatch(1);
@@ -161,9 +162,9 @@ public class TestTransactionRegistry {
     }
 
     @Test
-    public void shutdownAbortsAllHeldTransactions() {
+    void shutdownAbortsAllHeldTransactions() {
         registry = new TransactionRegistry(60_000, 50, 10_000);
-        DatasetGraphTDB dsg = freshDataset();
+        DatasetGraph dsg = freshDataset();
         HeldTransaction t1 = registry.begin(dsg, TxnType.READ);
         HeldTransaction t2 = registry.begin(dsg, TxnType.READ);
 

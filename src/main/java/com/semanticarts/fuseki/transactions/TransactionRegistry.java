@@ -29,7 +29,7 @@ import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 
 import org.apache.jena.query.TxnType;
-import org.apache.jena.tdb2.store.DatasetGraphTDB;
+import org.apache.jena.sparql.core.DatasetGraph;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -68,7 +68,7 @@ final class TransactionRegistry {
                 this.reaperIntervalMillis, this.reaperIntervalMillis, TimeUnit.MILLISECONDS);
     }
 
-    HeldTransaction begin(DatasetGraphTDB dsg, TxnType txnType) {
+    HeldTransaction begin(DatasetGraph dsg, TxnType txnType) {
         if (transactions.size() >= maxConcurrent) {
             throw new IllegalStateException("Too many concurrent held transactions (max " + maxConcurrent + ")");
         }

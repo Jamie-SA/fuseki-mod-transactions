@@ -64,20 +64,26 @@ public class TestActionTransactionControl {
         return "/ds-" + UUID.randomUUID();
     }
 
-    private void startServerWithTDB2Dataset() {
-        Dataset dataset = TDB2Factory.connectDataset(Location.mem());
+    private void startServerWithDataset(DatasetGraph dataset) {
         String path = uniqueDatasetPath();
         server = FusekiServer.create().port(0).add(path, dataset).build();
         server.start();
         base = "http://localhost:" + server.getPort() + path;
     }
 
-    private void startServerWithNonTDB2Dataset() {
-        DatasetGraph dataset = DatasetGraphFactory.createTxnMem();
-        String path = uniqueDatasetPath();
-        server = FusekiServer.create().port(0).add(path, dataset).build();
-        server.start();
-        base = "http://localhost:" + server.getPort() + path;
+    private void startServerWithTDB2Dataset() {
+        Dataset dataset = TDB2Factory.connectDataset(Location.mem());
+        startServerWithDataset(dataset.asDatasetGraph());
+    }
+
+    /** TIM: Jena's in-memory transactional dataset (DatasetGraphInMemory). */
+    private void startServerWithTIMDataset() {
+        startServerWithDataset(DatasetGraphFactory.createTxnMem());
+    }
+
+    /** A dataset that supports transactions but not abort -- must be rejected. */
+    private void startServerWithNonAbortableDataset() {
+        startServerWithDataset(DatasetGraphFactory.create());
     }
 
     @AfterEach
@@ -118,18 +124,50 @@ public class TestActionTransactionControl {
     }
 
     @Test
-    public void nonTDB2DatasetNeverGetsATransactionsEndpointAtAll() {
+    public void nonAbortableDatasetNeverGetsATransactionsEndpointAtAll() {
         // FMod_Transactions.configured() only wires the "transactions" endpoint
-        // onto TDB2-backed datasets in the first place, so a non-TDB2 dataset
-        // returns 404 (no such endpoint) rather than reaching doBegin()'s own
-        // defensive 501 check -- that check only matters if a dataset's
-        // backing store could change after configuration, which isn't
-        // something this prototype's own code path can trigger, but is kept
-        // as a safety net rather than an assumption.
-        startServerWithNonTDB2Dataset();
+        // onto datasets that supportTransactionAbort() in the first place, so
+        // a dataset that doesn't (e.g. DatasetGraphFactory.create(), "best
+        // effort" MRSW locking only) returns 404 (no such endpoint) rather
+        // than reaching doBegin()'s own defensive 501 check -- that check
+        // only matters if a dataset's capabilities could change after
+        // configuration, which isn't something this prototype's own code
+        // path can trigger, but is kept as a safety net rather than an
+        // assumption.
+        startServerWithNonAbortableDataset();
         HttpException ex = assertThrows(HttpException.class, () -> HttpOp.httpPostForm(base + "/transactions",
             Params.create().add("op", "begin").add("type", "write"), "application/json"));
         assertEquals(404, ex.getStatusCode());
+    }
+
+    @Test
+    public void beginReturnsATransactionIdForTIMDataset() {
+        // Confirms the module generalizes beyond TDB2 -- TIM
+        // (DatasetGraphInMemory) also supportsTransactionAbort().
+        startServerWithTIMDataset();
+        String txn = begin("write");
+        assertTrue(txn != null && !txn.isEmpty());
+    }
+
+    @Test
+    public void uncommittedChangeIsInvisibleToTheOrdinaryQueryEndpointUntilCommitOnTIM() {
+        startServerWithTIMDataset();
+        String txn = begin("write");
+
+        HttpOp.httpPostForm(base + "/transactions",
+            Params.create().add("op", "update").add("txn", txn)
+                .add("update", "INSERT DATA { <urn:s> <urn:p> \"hello\" }"), "application/json");
+
+        TypedInputStream beforeCommit = HttpOp.httpPostForm(base + "/query",
+            Params.create().add("query", "ASK { <urn:s> <urn:p> \"hello\" }"), "application/sparql-results+json");
+        assertEquals(false, JSON.parse(bodyOf(beforeCommit)).getBoolean("boolean"),
+            "the ordinary /query endpoint must not see an uncommitted change from a held transaction");
+
+        HttpOp.httpPostForm(base + "/transactions", Params.create().add("op", "commit").add("txn", txn), "application/json");
+
+        TypedInputStream afterCommit = HttpOp.httpPostForm(base + "/query",
+            Params.create().add("query", "ASK { <urn:s> <urn:p> \"hello\" }"), "application/sparql-results+json");
+        assertTrue(JSON.parse(bodyOf(afterCommit)).getBoolean("boolean"));
     }
 
     @Test
