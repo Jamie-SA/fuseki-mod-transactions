@@ -24,6 +24,8 @@ import java.util.NoSuchElementException;
 
 import jakarta.servlet.http.HttpServletResponse;
 
+import org.apache.jena.atlas.web.AcceptList;
+import org.apache.jena.atlas.web.MediaType;
 import org.apache.jena.fuseki.servlets.ActionErrorException;
 import org.apache.jena.fuseki.servlets.ActionREST;
 import org.apache.jena.fuseki.servlets.HttpAction;
@@ -37,6 +39,8 @@ import org.apache.jena.query.ResultSetFormatter;
 import org.apache.jena.query.TxnType;
 import org.apache.jena.riot.Lang;
 import org.apache.jena.riot.RDFDataMgr;
+import org.apache.jena.riot.RDFLanguages;
+import org.apache.jena.riot.WebContent;
 import org.apache.jena.sparql.core.DatasetGraph;
 import org.apache.jena.update.UpdateExecution;
 
@@ -48,6 +52,16 @@ import org.apache.jena.update.UpdateExecution;
 public class ActionTransactionControl extends ActionREST {
 
     private final FMod_Transactions module;
+
+    /** Result-set formats this endpoint can negotiate for SELECT/ASK. */
+    private static final AcceptList RESULT_SET_OFFERS = AcceptList.create(
+        WebContent.contentTypeResultsJSON, WebContent.contentTypeResultsXML,
+        WebContent.contentTypeTextCSV, WebContent.contentTypeTextTSV);
+
+    /** RDF formats this endpoint can negotiate for CONSTRUCT/DESCRIBE. */
+    private static final AcceptList RDF_OFFERS = AcceptList.create(
+        WebContent.contentTypeTurtle, WebContent.contentTypeRDFXML,
+        WebContent.contentTypeNTriples, WebContent.contentTypeJSONLD);
 
     public ActionTransactionControl(FMod_Transactions module) {
         this.module = module;
@@ -167,17 +181,21 @@ public class ActionTransactionControl extends ActionREST {
                 OutputStream out = action.getResponse().getOutputStream();
                 if (q.isAskType()) {
                     boolean result = qExec.execAsk();
-                    action.getResponse().setContentType("application/sparql-results+json");
-                    out.write(("{\"head\":{},\"boolean\":" + result + "}").getBytes(StandardCharsets.UTF_8));
+                    Lang lang = chooseResultSetLang(action);
+                    action.getResponse().setContentType(lang.getContentType().getContentTypeStr());
+                    ResultSetFormatter.output(out, result, lang);
                 } else if (q.isSelectType()) {
-                    action.getResponse().setContentType("application/sparql-results+json");
-                    ResultSetFormatter.outputAsJSON(out, qExec.execSelect());
+                    Lang lang = chooseResultSetLang(action);
+                    action.getResponse().setContentType(lang.getContentType().getContentTypeStr());
+                    ResultSetFormatter.output(out, qExec.execSelect(), lang);
                 } else if (q.isConstructType()) {
-                    action.getResponse().setContentType("text/turtle");
-                    RDFDataMgr.write(out, qExec.execConstruct(), Lang.TURTLE);
+                    Lang lang = chooseRdfLang(action);
+                    action.getResponse().setContentType(lang.getContentType().getContentTypeStr());
+                    RDFDataMgr.write(out, qExec.execConstruct(), lang);
                 } else if (q.isDescribeType()) {
-                    action.getResponse().setContentType("text/turtle");
-                    RDFDataMgr.write(out, qExec.execDescribe(), Lang.TURTLE);
+                    Lang lang = chooseRdfLang(action);
+                    action.getResponse().setContentType(lang.getContentType().getContentTypeStr());
+                    RDFDataMgr.write(out, qExec.execDescribe(), lang);
                 } else {
                     throw new ActionErrorException(HttpServletResponse.SC_BAD_REQUEST, "Unsupported query form", null);
                 }
@@ -203,6 +221,35 @@ public class ActionTransactionControl extends ActionREST {
             return null;
         });
         ServletOps.successNoContent(action);
+    }
+
+    /**
+     * Content negotiation for SELECT/ASK results, mirroring what Fuseki's
+     * own {@code /ds/query} endpoint offers ({@code Accept}-driven choice
+     * among the standard result-set serializations), scoped to this
+     * endpoint's {@code query}/{@code update} form-parameter model rather
+     * than a raw request body. Defaults to JSON, matching this endpoint's
+     * previous hardcoded behavior, when the client sends no {@code Accept}
+     * header or nothing offered here matches it.
+     */
+    private static Lang chooseResultSetLang(HttpAction action) {
+        MediaType chosen = negotiate(action, RESULT_SET_OFFERS, WebContent.contentTypeResultsJSON);
+        return WebContent.contentTypeToLangResultSet(chosen.getContentTypeStr());
+    }
+
+    /** Same idea as {@link #chooseResultSetLang}, for CONSTRUCT/DESCRIBE RDF output. Defaults to Turtle. */
+    private static Lang chooseRdfLang(HttpAction action) {
+        MediaType chosen = negotiate(action, RDF_OFFERS, WebContent.contentTypeTurtle);
+        return RDFLanguages.contentTypeToLang(chosen.getContentTypeStr());
+    }
+
+    private static MediaType negotiate(HttpAction action, AcceptList offers, String defaultContentType) {
+        String acceptHeader = action.getRequestHeader("Accept");
+        if (acceptHeader == null || acceptHeader.isBlank()) {
+            return MediaType.create(defaultContentType);
+        }
+        MediaType chosen = AcceptList.match(new AcceptList(acceptHeader), offers);
+        return chosen != null ? chosen : MediaType.create(defaultContentType);
     }
 
     @Override

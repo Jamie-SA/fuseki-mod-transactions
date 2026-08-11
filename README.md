@@ -237,6 +237,31 @@ curl -s http://localhost:3030/ds/query --data-urlencode 'query=SELECT * WHERE { 
 `type` for `begin` is one of `read`, `write` (default), `read-promote`,
 `read-committed-promote` -- these map directly onto `org.apache.jena.query.TxnType`.
 
+### Choosing a transaction type
+
+These aren't interchangeable for a real client workload -- reported from an
+actual integration:
+
+- **`write`** takes the dataset's single write lock for the transaction's
+  entire held lifetime. A second client trying to `begin` a `write`
+  transaction concurrently doesn't fail fast -- it blocks until the first one
+  commits/aborts, or until the idle reaper eventually force-aborts it (see
+  "Known limitations" below). Fine for one client at a time; a bad fit for
+  concurrent clients that hold transactions open across multiple requests.
+- **`read-promote`** (`TxnType.READ_PROMOTE`) starts as a read and only takes
+  the write lock at the point a write actually happens, so multiple clients
+  can hold one concurrently without blocking each other up front -- but the
+  promotion itself can then fail outright (`Can't become a write
+  transaction`, from Jena's own `TransactionCoordinator`) if another
+  transaction already promoted and is still holding the write lock, rather
+  than queuing.
+- **`read-committed-promote`** (`TxnType.READ_COMMITTED_PROMOTE`) matched a
+  real client's expected concurrent-update behavior best in practice: reads
+  see the last committed state (not a fixed snapshot) and promotion queues
+  for the write lock instead of failing. If your client issues both reads and
+  writes against a held transaction and expects concurrent clients to be able
+  to do the same without hard failures, start here rather than `write`.
+
 ## Known limitations (by design, for a prototype)
 
 - Confirmed against TDB2 and TIM; a dataset that doesn't
@@ -255,6 +280,46 @@ curl -s http://localhost:3030/ds/query --data-urlencode 'query=SELECT * WHERE { 
 - `/ds/query` and `/ds/update` are unaffected and cannot themselves be used
   inside a held transaction (only the `transactions` endpoint's own `op=query`/
   `op=update` can) -- see the design notes below for why.
+- `op=query` negotiates `Accept` for the four common text formats --
+  `application/sparql-results+json`/`+xml`, `text/csv`, `text/tab-separated-values`
+  for SELECT/ASK, and `text/turtle`, `application/rdf+xml`, `application/n-triples`,
+  `application/ld+json` for CONSTRUCT/DESCRIBE, defaulting to JSON/Turtle if
+  `Accept` is missing or matches none of those -- but that's still narrower
+  than what `/ds/query` itself offers: no SPARQL Results Thrift/Protobuf (the
+  binary result formats), and no other RDF serializations (TriG, RDF/XML's
+  non-abbreviated form, etc). **N-Quads specifically is never offered, by
+  design, not oversight**: `CONSTRUCT`/`DESCRIBE` here return a single
+  `Model` (triples), and N-Quads is a quads format -- there's no default
+  graph name to attach the fourth position to. A client expecting
+  transaction-scoped `CONSTRUCT` results as N-Quads (reported from a real
+  integration, where the client library defaulted its RDF conversion step to
+  request N-Quads generally) needs to either ask for Turtle/RDF-XML/N-Triples/
+  JSON-LD explicitly, or be reconfigured to expect a triples format from this
+  endpoint specifically.
+- `op=query`/`op=update` only accept the query/update text as a `query`/`update`
+  form parameter, not as a raw request body with `Content-Type:
+  application/sparql-query`/`application/sparql-update` -- the second form the
+  SPARQL 1.1 Protocol also allows.
+- No `default-graph-uri`/`named-graph-uri` (query) or `using-graph-uri`/
+  `using-named-graph-uri` (update) dataset-description parameters -- a scoped
+  query/update always runs against the whole dataset as held.
+- `op=query` is POST-only; the SPARQL 1.1 Protocol also allows GET for
+  queries, but this endpoint's `doGet` is entirely taken up by transaction
+  status (see the curl example above), so there's no GET-based query path
+  here.
+- No `timeout` parameter, no per-request union-default-graph toggle, and none
+  of the other execution controls `/ds/query` normally exposes.
+- No Graph Store Protocol (GSP) support -- `doPut`/`doDelete`/`doPatch` are
+  hard `405`s on this endpoint, so a held transaction can only touch RDF
+  data via SPARQL Update text, not by `PUT`/`POST`/`GET`/`DELETE`-ing an
+  individual named graph directly.
+
+These protocol-parity gaps are a direct consequence of this being a
+module-level `op=`-based control endpoint rather than a real extension of
+`/ds/query`/`/ds/update` (see "Why not reuse..." below) -- closing them for
+real, so an unmodified SPARQL client gets full parity, is exactly what
+[DISPATCH-LEVEL-DESIGN.md](DISPATCH-LEVEL-DESIGN.md) sketches as the
+Fuseki-core alternative.
 
 ## Why not reuse `/ds/query` and `/ds/update` directly?
 

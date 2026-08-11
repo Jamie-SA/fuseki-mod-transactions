@@ -72,6 +72,13 @@ podman build --build-arg JENA_VERSION=6.2.0 -t fuseki .
 This produces a local image tagged `fuseki`. (`JENA_VERSION` is mandatory --
 the build refuses to proceed without it.)
 
+**This step is not obvious if you're coming from `docker.io/stain/jena-fuseki`**
+(a common third-party pre-built Fuseki image) -- that image is unrelated to
+this workflow and doesn't have this module's classpath changes baked in.
+There is no official `apache/jena-fuseki` image on any registry (see above);
+this local build step is mandatory, not optional, for this module's own
+`Dockerfile` (below) to have a `fuseki:latest` base to `FROM`.
+
 ## Layer this module on top
 
 This module's own directory already contains a `Dockerfile` and
@@ -102,6 +109,19 @@ the `localhost/` registry namespace internally (you'd see it as
 `localhost/fuseki:latest` in `podman images`), but the plain `fuseki:latest`
 form here resolves correctly without needing the explicit prefix.
 
+**Podman may refuse to resolve an unqualified base image at all, on some
+machines.** The `maven:3.9-eclipse-temurin-21` build-stage base above is
+written with the explicit `docker.io/library/` prefix specifically to avoid
+this: podman (unlike Docker) only pulls a short, registry-less image name
+(e.g. plain `eclipse-temurin:21-alpine`) if it has an unqualified-search
+registry list configured (`unqualified-search-registries` in
+`/etc/containers/registries.conf`); if that list is empty or missing, the
+pull just fails rather than silently defaulting to Docker Hub the way Docker
+itself does. If you change either `FROM` line in this project's `Dockerfile`,
+keep the full `docker.io/library/<image>` (or your actual registry) form
+rather than reverting to a short name, or the build may only work on
+machines that happen to have that config set.
+
 **`entrypoint.sh`** (replaces the base image's own, reusing its env vars so
 this doesn't need to hardcode a Jena version):
 ```sh
@@ -124,9 +144,17 @@ podman build -t fuseki-with-transactions .
 
 ## Run it
 
-**The module only wires itself onto TDB2-backed datasets** (see the main
-README) -- `--mem` gives you an in-memory, non-TDB2 dataset, so the
-`transactions` endpoint won't exist on it. Use `--tdb2`:
+**The module only wires itself onto datasets that `supportsTransactionAbort()`**
+(see the main README) -- confirmed for TDB2 and TIM (Jena's in-memory
+transactional dataset). As of Jena 6.2.0, Fuseki's own `--mem` CLI flag
+actually builds a TIM dataset (`DatasetGraphFactory.createTxnMem()`, checked
+directly against `jena-fuseki-main`'s `DSGSetup` class, not assumed) -- so
+`--mem` datasets *do* get the `transactions` endpoint too, contrary to what
+an earlier version of this doc claimed. Non-transactional datasets (no
+`transactions` endpoint) only come from more unusual setups, e.g. a custom
+assembler explicitly using `DatasetGraphFactory.create()`. `--tdb2` remains
+the flag to reach for when you want on-disk persistence rather than TIM's
+purely in-memory storage:
 
 ```sh
 mkdir -p databases/DB2
@@ -200,3 +228,68 @@ startup line, `Added 'transactions' endpoint for dataset '/ds'`, which
 See the main [README.md](README.md) for the full curl walkthrough (update,
 query-inside-transaction, isolation from the ordinary `/ds/query` endpoint,
 commit/abort).
+
+## Dynamic datasets added via `/$/datasets`
+
+Everything above assumes the dataset (`/ds`) is named on the server's launch
+command line, so it exists before the server starts. Fuseki also supports
+adding datasets *after* startup through its admin API
+(`POST /$/datasets`), and that path has friction points specific to this
+module that are easy to lose an afternoon to. Reported from a real
+integration; not independently re-verified in this repo's own sandboxed
+environment (see CLAUDE.md's Containers/Podman section for why), so treat
+this as a documented starting point, not a guarantee.
+
+**A dataset added dynamically does not automatically get the `transactions`
+endpoint.** `FMod_Transactions.configured()` (see `FMod_Transactions.java`)
+only walks the `DataAccessPointRegistry` *once*, at server-build time --
+that's the hook `FusekiAutoModule` gives a module, and there's no equivalent
+per-dataset hook that fires again when `/$/datasets` adds one later. The
+fix is to wire the endpoint yourself, directly in the dataset assembler
+Turtle you `POST` to `/$/datasets`, by adding an explicit `fuseki:endpoint`
+block naming this module's operation:
+
+```turtle
+fuseki:endpoint [
+    fuseki:operation <http://jena.apache.org/fuseki/modules/transactions#transactions> ;
+    fuseki:name "transactions"
+] ;
+```
+
+(That operation IRI is `FMod_Transactions.TRANSACTIONS`'s own identifier --
+it's stable, not something to guess at; check the constant in
+`FMod_Transactions.java` if it's ever unclear which string to use.)
+
+**Config-file uploads to `/$/datasets` are disabled by default.** Posting a
+Turtle assembler document (rather than the simpler form-parameter dataset
+creation) fails with `Service configuration from an upload file not
+supported` unless the server was started with:
+
+```sh
+-Dfuseki:allowAddByConfigFile=true
+```
+
+This is a stock Fuseki safety default, unrelated to this module specifically
+-- but it's exactly the path you need if you're adding the `fuseki:endpoint`
+block above, since that requires posting a full assembler document rather
+than the simple form fields. Add it via `JAVA_OPTIONS` in this module's
+container (see "How Jena's own Fuseki image works" above for where that env
+var is read), or as a plain `-D` argument if running the jar directly.
+
+**The admin API may reject requests from outside the container, even with
+the port published.** Fuseki's default Shiro configuration restricts
+`/$/**` (the admin/datasets API) to `localhost` requests -- checked at the
+HTTP layer, not just "same machine" -- so a request arriving through a
+published `podman`/`docker` port from the host (or anywhere else off-box)
+gets `403 Access denied : only localhost access allowed`, even though
+`curl http://localhost:3030/$/datasets` from *inside* the container would
+succeed. This is Fuseki's own admin-auth behavior, implemented by its
+built-in `FMod_Shiro` module and a `shiro.ini` policy file (checked directly
+in `jena-fuseki-main` -- real classes/strings, not assumed), not something
+this module changes. The base image accepts a `--shiro <path>` server
+argument (or a `FUSEKI_SHIRO` env var) naming an alternate `shiro.ini`; for
+local development, mount one into the container that widens the default
+`localhost`-only rule for the `/$/**` admin paths, and point the entrypoint
+at it. Treat this the same as any other admin-surface exposure decision --
+fine for local dev, not something to carry into a real deployment without
+thinking through who else can reach that port.

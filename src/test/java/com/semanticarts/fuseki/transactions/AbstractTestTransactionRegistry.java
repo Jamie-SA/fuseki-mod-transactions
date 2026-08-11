@@ -18,12 +18,14 @@
 package com.semanticarts.fuseki.transactions;
 
 import static org.awaitility.Awaitility.await;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.NoSuchElementException;
+import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
@@ -63,6 +65,28 @@ abstract class AbstractTestTransactionRegistry {
         assertNotEquals(t1.id, t2.id);
         assertSame(t1, registry.get(t1.id));
         assertSame(t2, registry.get(t2.id));
+
+        registry.abort(t1.id);
+        registry.abort(t2.id);
+    }
+
+    @Test
+    void beginGeneratesUnguessableIds() {
+        // Transaction ids double as bearer credentials for the held
+        // transaction -- anyone holding one can query/update/commit/abort it
+        // -- so they must be a version-4 (randomly generated, not sequential
+        // or timestamp-based) UUID rather than something an attacker could
+        // predict or enumerate.
+        registry = new TransactionRegistry(60_000, 50, 10_000);
+        DatasetGraph dsg = freshDataset();
+
+        HeldTransaction t1 = registry.begin(dsg, TxnType.READ);
+        HeldTransaction t2 = registry.begin(dsg, TxnType.READ);
+
+        UUID u1 = UUID.fromString(t1.id);
+        UUID u2 = UUID.fromString(t2.id);
+        assertEquals(4, u1.version(), "transaction id must be a random (version 4) UUID");
+        assertNotEquals(u1, u2);
 
         registry.abort(t1.id);
         registry.abort(t2.id);

@@ -188,6 +188,80 @@ public class TestActionTransactionControl {
     }
 
     @Test
+    public void queryOpDefaultsToJsonResultsWhenNoAcceptHeaderMatters() {
+        startServerWithTDB2Dataset();
+        String txn = begin("write");
+
+        TypedInputStream resp = HttpOp.httpPostForm(base + "/transactions",
+            Params.create().add("op", "query").add("txn", txn).add("query", "ASK {}"), null);
+        assertEquals("application/sparql-results+json", resp.getContentType());
+
+        HttpOp.httpPostForm(base + "/transactions", Params.create().add("op", "abort").add("txn", txn), "application/json");
+    }
+
+    @Test
+    public void queryOpNegotiatesXmlResultsForSelect() {
+        startServerWithTDB2Dataset();
+        String txn = begin("write");
+
+        TypedInputStream resp = HttpOp.httpPostForm(base + "/transactions",
+            Params.create().add("op", "query").add("txn", txn).add("query", "SELECT * WHERE { ?s ?p ?o }"),
+            "application/sparql-results+xml");
+        assertEquals("application/sparql-results+xml", resp.getContentType());
+        assertTrue(bodyOf(resp).contains("<sparql"));
+
+        HttpOp.httpPostForm(base + "/transactions", Params.create().add("op", "abort").add("txn", txn), "application/json");
+    }
+
+    @Test
+    public void queryOpNegotiatesCsvResultsForSelect() {
+        startServerWithTDB2Dataset();
+        String txn = begin("write");
+
+        HttpOp.httpPostForm(base + "/transactions",
+            Params.create().add("op", "update").add("txn", txn)
+                .add("update", "INSERT DATA { <urn:s> <urn:p> \"hello\" }"), "application/json");
+
+        TypedInputStream resp = HttpOp.httpPostForm(base + "/transactions",
+            Params.create().add("op", "query").add("txn", txn).add("query", "SELECT * WHERE { ?s ?p ?o }"),
+            "text/csv");
+        assertEquals("text/csv", resp.getContentType());
+        assertTrue(bodyOf(resp).contains("urn:s"));
+
+        HttpOp.httpPostForm(base + "/transactions", Params.create().add("op", "abort").add("txn", txn), "application/json");
+    }
+
+    @Test
+    public void queryOpNegotiatesRdfXmlForConstruct() {
+        startServerWithTDB2Dataset();
+        String txn = begin("write");
+
+        HttpOp.httpPostForm(base + "/transactions",
+            Params.create().add("op", "update").add("txn", txn)
+                .add("update", "INSERT DATA { <http://example/s> <http://example/p> <http://example/o> }"), "application/json");
+
+        TypedInputStream resp = HttpOp.httpPostForm(base + "/transactions",
+            Params.create().add("op", "query").add("txn", txn).add("query", "CONSTRUCT WHERE { ?s ?p ?o }"),
+            "application/rdf+xml");
+        assertEquals("application/rdf+xml", resp.getContentType());
+        assertTrue(bodyOf(resp).contains("<rdf:RDF"));
+
+        HttpOp.httpPostForm(base + "/transactions", Params.create().add("op", "abort").add("txn", txn), "application/json");
+    }
+
+    @Test
+    public void queryOpFallsBackToDefaultWhenAcceptHeaderMatchesNothingOffered() {
+        startServerWithTDB2Dataset();
+        String txn = begin("write");
+
+        TypedInputStream resp = HttpOp.httpPostForm(base + "/transactions",
+            Params.create().add("op", "query").add("txn", txn).add("query", "ASK {}"), "application/x-not-a-real-format");
+        assertEquals("application/sparql-results+json", resp.getContentType());
+
+        HttpOp.httpPostForm(base + "/transactions", Params.create().add("op", "abort").add("txn", txn), "application/json");
+    }
+
+    @Test
     public void uncommittedChangeIsInvisibleToTheOrdinaryQueryEndpointUntilCommit() {
         startServerWithTDB2Dataset();
         String txn = begin("write");
