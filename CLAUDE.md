@@ -37,7 +37,16 @@ and in `CHANGELOG.md`):
   on it), but the actual accepted design, if any, will likely need to live in
   Fuseki core (request dispatch), not ship as an add-on module. See
   [DISPATCH-LEVEL-DESIGN.md](DISPATCH-LEVEL-DESIGN.md) for a sketch of what
-  that would look like.
+  that would look like. **That document also now covers a corrected finding**:
+  a module can in fact override the handler bound to Fuseki's own
+  `/ds/query`/`/ds/update`/GSP operations (`FusekiServer.Builder.registerOperation()`
+  isn't limited to new operations, verified against the real `6.2.0`
+  bytecode), so "modifying request dispatch" turns out to be *possible*
+  from a module after all -- just fragile and not composable with other
+  modules wanting the same override point, which if anything reinforces
+  afs's "doing it right" preference for a real core hook rather than
+  undermining it. See that document's "A module-space alternative exists,
+  but at a real cost" section for the full analysis.
 - **He suggested, independently, essentially the same "dedicated thread per
   transaction" mechanism** already used in `HeldTransaction` — but at
   Fuseki's dispatch layer, generalized across backends, rather than inside a

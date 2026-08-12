@@ -314,12 +314,19 @@ actual integration:
   data via SPARQL Update text, not by `PUT`/`POST`/`GET`/`DELETE`-ing an
   individual named graph directly.
 
-These protocol-parity gaps are a direct consequence of this being a
-module-level `op=`-based control endpoint rather than a real extension of
-`/ds/query`/`/ds/update` (see "Why not reuse..." below) -- closing them for
-real, so an unmodified SPARQL client gets full parity, is exactly what
-[DISPATCH-LEVEL-DESIGN.md](DISPATCH-LEVEL-DESIGN.md) sketches as the
-Fuseki-core alternative.
+These protocol-parity gaps exist because this module's control endpoint
+reimplements query/update/negotiation logic from scratch rather than reusing
+Fuseki's own `/ds/query`/`/ds/update`/`/ds/data` servlets (see "Why not
+reuse..." below) -- but that's this module's own design choice, not a hard
+wall imposed by the module system. [DISPATCH-LEVEL-DESIGN.md](DISPATCH-LEVEL-DESIGN.md)
+sketches the Fuseki-core version of closing these for real, and also now
+documents a *module-space* alternative -- subclassing Fuseki's stock
+query/update/GSP servlets and overriding their operation bindings -- that
+was found, on inspection, to be technically possible without a core patch
+at all, at the cost of being fragile and not composable with other modules
+wanting the same override point (concretely: `jena-fuseki-access` already
+wants it). This module doesn't attempt that; its own `op=`-based endpoint,
+with the gaps above, remains the simpler path it started as.
 
 ## Why not reuse `/ds/query` and `/ds/update` directly?
 
