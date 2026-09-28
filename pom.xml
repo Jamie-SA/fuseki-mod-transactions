@@ -84,7 +84,7 @@
         <!-- Convenience only: `mvn exec:java` runs the demo server. -->
         <groupId>org.codehaus.mojo</groupId>
         <artifactId>exec-maven-plugin</artifactId>
-        <version>3.4.1</version>
+        <version>3.6.4</version>
         <configuration>
           <mainClass>com.semanticarts.fuseki.transactions.demo.DemoServer</mainClass>
         </configuration>
